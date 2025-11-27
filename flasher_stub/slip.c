@@ -21,6 +21,9 @@ void SLIP_send_frame_data(char ch) {
   } else if (ch == '\xdb') {
 	stub_tx_one_char('\xdb');
 	stub_tx_one_char('\xdd');
+  } else if (ch == '\xff') {
+	stub_tx_one_char('\xdb');
+	stub_tx_one_char('\xde');
   } else {
 	stub_tx_one_char(ch);
   }
@@ -68,6 +71,10 @@ int16_t SLIP_recv_byte(char byte, slip_state_t *state)
 	if (byte == '\xdd') {
 	  *state = SLIP_FRAME;
 	  return '\xdb';
+	}
+	if (byte == '\xde') {
+	  *state = SLIP_FRAME;
+	  return '\xff';
 	}
 	return SLIP_NO_BYTE; /* actually a framing error */
   }
