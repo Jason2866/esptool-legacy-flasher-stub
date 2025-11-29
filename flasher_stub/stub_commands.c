@@ -140,13 +140,12 @@ int handle_flash_erase(uint32_t addr, uint32_t len) {
 
 void handle_flash_read(uint32_t addr, uint32_t len, uint32_t block_size,
                   uint32_t max_in_flight) {
-  uint8_t buf[FLASH_SECTOR_SIZE]; /* Main buffer for reading and sending */
+  uint8_t buf[FLASH_SECTOR_SIZE];
   uint8_t digest[16];
   struct MD5Context ctx;
   uint32_t num_sent = 0;
   uint8_t res = 0;
 
-  /* This is one routine where we still do synchronous I/O */
   stub_rx_async_enable(false);
 
   if (block_size > sizeof(buf)) {
@@ -154,13 +153,31 @@ void handle_flash_read(uint32_t addr, uint32_t len, uint32_t block_size,
   }
   
   MD5Init(&ctx);
-  
+
+#ifdef ESP8266
+  /* ESP8266: Simple version without ACKs to save IRAM */
+  while (num_sent < len) {
+    uint32_t n = len - num_sent;
+    if (n > block_size) n = block_size;
+    
+    res = SPIRead(addr, (uint32_t *)buf, n);
+    if (res != 0) {
+      stub_rx_async_enable(true);
+      return;
+    }
+    
+    SLIP_send(buf, n);
+    stub_tx_flush();
+    MD5Update(&ctx, buf, n);
+    addr += n;
+    num_sent += n;
+  }
+#else
+  /* ESP32 and later: ACK-based protocol with retransmission */
   uint32_t num_acked = 0;
-  /* Cache for MD5 calculation - reuse buf for sending, cache only metadata */
-  uint32_t cached_addr = 0; /* Address of cached data */
-  uint32_t cached_len = 0; /* Length of cached data */
+  uint32_t cached_addr = 0;
+  uint32_t cached_len = 0;
   
-  /* Reliable read loop with ACKs and retransmission */
   while (num_acked < len) {
     /* Send blocks up to max_in_flight ahead of ACKs */
     while (num_sent < len && num_sent - num_acked < max_in_flight * block_size) {
@@ -248,6 +265,7 @@ void handle_flash_read(uint32_t addr, uint32_t len, uint32_t block_size,
       ets_delay_us(10000); /* 10ms delay before retransmit */
     }
   }
+#endif /* !ESP8266 */
   
   /* Send MD5 digest */
   MD5Final(digest, &ctx);
