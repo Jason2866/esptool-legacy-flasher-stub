@@ -143,7 +143,7 @@ void handle_flash_read(uint32_t addr, uint32_t len, uint32_t block_size,
   uint8_t buf[FLASH_SECTOR_SIZE];
   uint8_t digest[16];
   struct MD5Context ctx;
-  uint32_t num_sent = 0, num_acked = 0;
+  uint32_t num_sent = 0;
   uint8_t res = 0;
 
   /* This is one routine where we still do synchronous I/O */
@@ -153,32 +153,35 @@ void handle_flash_read(uint32_t addr, uint32_t len, uint32_t block_size,
     return;
   }
   MD5Init(&ctx);
-  while (num_acked < len && num_acked <= num_sent) {
-    while (num_sent < len && num_sent - num_acked < max_in_flight) {
-      uint32_t n = len - num_sent;
-      if (n > block_size) n = block_size;
-      #if (ESP32S3 && !ESP32S3BETA2) || ESP32P4 || ESP32P4RC1 || ESP32C5
-        if (large_flash_mode) {
-          res = SPIRead4B(1, addr, buf, n);
-        } else {
-          res = SPIRead(addr, (uint32_t *)buf, n);
-        }
-      #else
+  
+  /* Simple synchronous read loop - send one block at a time
+     Host will receive each block and the command won't return until all data is sent */
+  while (num_sent < len) {
+    uint32_t n = len - num_sent;
+    if (n > block_size) n = block_size;
+    
+    #if (ESP32S3 && !ESP32S3BETA2) || ESP32P4 || ESP32P4RC1 || ESP32C5
+      if (large_flash_mode) {
+        res = SPIRead4B(1, addr, buf, n);
+      } else {
         res = SPIRead(addr, (uint32_t *)buf, n);
-      #endif // ESP32S3
-      if (res != 0) {
-        break;
       }
-      SLIP_send(buf, n);
-      MD5Update(&ctx, buf, n);
-      addr += n;
-      num_sent += n;
-    }
-    int r = SLIP_recv(&num_acked, sizeof(num_acked));
-    if (r != 4) {
+    #else
+      res = SPIRead(addr, (uint32_t *)buf, n);
+    #endif // ESP32S3
+    
+    if (res != 0) {
       break;
     }
+    
+    /* Send block and wait for it to be transmitted */
+    SLIP_send(buf, n);
+    MD5Update(&ctx, buf, n);
+    addr += n;
+    num_sent += n;
   }
+  
+  /* Send MD5 digest at the end */
   MD5Final(digest, &ctx);
   SLIP_send(digest, sizeof(digest));
 
