@@ -171,7 +171,10 @@ void handle_flash_read(uint32_t addr, uint32_t len, uint32_t block_size,
     #endif // ESP32S3
     
     if (res != 0) {
-      break;
+      /* Flash read error - abort immediately without sending anything
+         This will cause a timeout on the host side */
+      stub_rx_async_enable(true);
+      return;
     }
     
     /* Send block */
@@ -181,9 +184,6 @@ void handle_flash_read(uint32_t addr, uint32_t len, uint32_t block_size,
     addr += n;
     num_sent += n;
     
-    /* Delay to prevent overwhelming the host at high baud rates
-       Give the host time to process the data before sending next block */
-    ets_delay_us(2000);  /* 2ms delay between blocks */
   }
   
   /* Send MD5 digest at the end */
