@@ -152,10 +152,10 @@ void handle_flash_read(uint32_t addr, uint32_t len, uint32_t block_size,
   if (block_size > sizeof(buf)) {
     return;
   }
+  
   MD5Init(&ctx);
   
-  /* Simple synchronous read loop - send one block at a time
-     Host will receive each block and the command won't return until all data is sent */
+  /* Simple synchronous read loop with delays for flow control */
   while (num_sent < len) {
     uint32_t n = len - num_sent;
     if (n > block_size) n = block_size;
@@ -174,16 +174,22 @@ void handle_flash_read(uint32_t addr, uint32_t len, uint32_t block_size,
       break;
     }
     
-    /* Send block and wait for it to be transmitted */
+    /* Send block */
     SLIP_send(buf, n);
+    stub_tx_flush();  /* Ensure data is actually sent */
     MD5Update(&ctx, buf, n);
     addr += n;
     num_sent += n;
+    
+    /* Delay to prevent overwhelming the host at high baud rates
+       Give the host time to process the data before sending next block */
+    ets_delay_us(2000);  /* 2ms delay between blocks */
   }
   
   /* Send MD5 digest at the end */
   MD5Final(digest, &ctx);
   SLIP_send(digest, sizeof(digest));
+  stub_tx_flush();
 
   /* Go back to async RX */
   stub_rx_async_enable(true);
