@@ -140,7 +140,7 @@ int handle_flash_erase(uint32_t addr, uint32_t len) {
 
 void handle_flash_read(uint32_t addr, uint32_t len, uint32_t block_size,
                   uint32_t max_in_flight) {
-  uint8_t buf[FLASH_SECTOR_SIZE];
+  uint8_t buf[FLASH_SECTOR_SIZE]; /* Main buffer for reading and sending */
   uint8_t digest[16];
   struct MD5Context ctx;
   uint32_t num_sent = 0;
@@ -155,38 +155,101 @@ void handle_flash_read(uint32_t addr, uint32_t len, uint32_t block_size,
   
   MD5Init(&ctx);
   
-  /* Simple synchronous read loop with delays for flow control */
-  while (num_sent < len) {
-    uint32_t n = len - num_sent;
-    if (n > block_size) n = block_size;
-    
-    #if (ESP32S3 && !ESP32S3BETA2) || ESP32P4 || ESP32P4RC1 || ESP32C5
-      if (large_flash_mode) {
-        res = SPIRead4B(1, addr, buf, n);
-      } else {
+  uint32_t num_acked = 0;
+  /* Cache for MD5 calculation - reuse buf for sending, cache only metadata */
+  uint32_t cached_addr = 0; /* Address of cached data */
+  uint32_t cached_len = 0; /* Length of cached data */
+  
+  /* Reliable read loop with ACKs and retransmission */
+  while (num_acked < len) {
+    /* Send blocks up to max_in_flight ahead of ACKs */
+    while (num_sent < len && num_sent - num_acked < max_in_flight * block_size) {
+      uint32_t n = len - num_sent;
+      if (n > block_size) n = block_size;
+      
+      #if (ESP32S3 && !ESP32S3BETA2) || ESP32P4 || ESP32P4RC1 || ESP32C5
+        if (large_flash_mode) {
+          res = SPIRead4B(1, addr, buf, n);
+        } else {
+          res = SPIRead(addr, (uint32_t *)buf, n);
+        }
+      #else
         res = SPIRead(addr, (uint32_t *)buf, n);
+      #endif // ESP32S3
+      
+      if (res != 0) {
+        /* Flash read error - abort immediately */
+        stub_rx_async_enable(true);
+        return;
       }
-    #else
-      res = SPIRead(addr, (uint32_t *)buf, n);
-    #endif // ESP32S3
-    
-    if (res != 0) {
-      /* Flash read error - abort immediately without sending anything
-         This will cause a timeout on the host side */
-      stub_rx_async_enable(true);
-      return;
+      
+      /* Cache metadata for MD5 calculation */
+      cached_addr = addr;
+      cached_len = n;
+      
+      /* Send block */
+      SLIP_send(buf, n);
+      stub_tx_flush();
+      addr += n;
+      num_sent += n;
     }
     
-    /* Send block */
-    SLIP_send(buf, n);
-    stub_tx_flush();  /* Ensure data is actually sent */
-    MD5Update(&ctx, buf, n);
-    addr += n;
-    num_sent += n;
+    /* Wait for ACK from host with timeout */
+    uint32_t ack_value = 0;
+    int r = SLIP_recv(&ack_value, sizeof(ack_value));
     
+    if (r == 4 && ack_value > num_acked && ack_value <= num_sent) {
+      /* Valid ACK received - update MD5 with acknowledged data */
+      /* With max_in_flight=1, the ACKed data should be what we just sent */
+      if (ack_value == num_acked + cached_len && cached_len > 0) {
+        /* Re-read the cached block for MD5 (we reused buf for sending) */
+        #if (ESP32S3 && !ESP32S3BETA2) || ESP32P4 || ESP32P4RC1 || ESP32C5
+          if (large_flash_mode) {
+            SPIRead4B(1, cached_addr, buf, cached_len);
+          } else {
+            SPIRead(cached_addr, (uint32_t *)buf, cached_len);
+          }
+        #else
+          SPIRead(cached_addr, (uint32_t *)buf, cached_len);
+        #endif
+        
+        MD5Update(&ctx, buf, cached_len);
+      } else {
+        /* ACK doesn't match - re-read all newly acknowledged data */
+        uint32_t newly_acked = ack_value - num_acked;
+        uint32_t temp_addr = addr - (num_sent - num_acked);
+        
+        while (newly_acked > 0) {
+          uint32_t n = newly_acked;
+          if (n > block_size) n = block_size;
+          
+          #if (ESP32S3 && !ESP32S3BETA2) || ESP32P4 || ESP32P4RC1 || ESP32C5
+            if (large_flash_mode) {
+              SPIRead4B(1, temp_addr, buf, n);
+            } else {
+              SPIRead(temp_addr, (uint32_t *)buf, n);
+            }
+          #else
+            SPIRead(temp_addr, (uint32_t *)buf, n);
+          #endif
+          
+          MD5Update(&ctx, buf, n);
+          temp_addr += n;
+          newly_acked -= n;
+        }
+      }
+      
+      num_acked = ack_value;
+    } else {
+      /* No ACK or invalid ACK - retransmit from num_acked */
+      uint32_t bytes_to_retransmit = num_sent - num_acked;
+      addr -= bytes_to_retransmit;
+      num_sent = num_acked;
+      ets_delay_us(10000); /* 10ms delay before retransmit */
+    }
   }
   
-  /* Send MD5 digest at the end */
+  /* Send MD5 digest */
   MD5Final(digest, &ctx);
   SLIP_send(digest, sizeof(digest));
   stub_tx_flush();

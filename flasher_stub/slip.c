@@ -76,17 +76,27 @@ int16_t SLIP_recv_byte(char byte, slip_state_t *state)
 
 /* This function is needed for the synchornous I/O case,
  * which is only flash_read command at the moment.
+ * Returns number of bytes received, or 0 on timeout.
  */
 uint32_t SLIP_recv(void *pkt, uint32_t max_len) {
   uint32_t len = 0;
   slip_state_t state = SLIP_NO_FRAME;
   uint8_t *p = (uint8_t *) pkt;
+  uint32_t timeout_counter = 0;
+  const uint32_t TIMEOUT_LIMIT = 100000; /* ~100ms timeout at typical CPU speeds */
 
   int16_t r;
   do {
-	r = SLIP_recv_byte(stub_rx_one_char(), &state);
+	char byte = stub_rx_one_char();
+	r = SLIP_recv_byte(byte, &state);
 	if(r >= 0 && len < max_len) {
 	  p[len++] = (uint8_t)r;
+	  timeout_counter = 0; /* Reset timeout on valid data */
+	} else if (r == SLIP_NO_BYTE) {
+	  timeout_counter++;
+	  if (timeout_counter > TIMEOUT_LIMIT) {
+		return 0; /* Timeout - return 0 to indicate no data received */
+	  }
 	}
   } while(r != SLIP_FINISHED_FRAME);
 
