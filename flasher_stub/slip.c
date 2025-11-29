@@ -83,7 +83,7 @@ uint32_t SLIP_recv(void *pkt, uint32_t max_len) {
   slip_state_t state = SLIP_NO_FRAME;
   uint8_t *p = (uint8_t *) pkt;
   uint32_t timeout_counter = 0;
-  const uint32_t TIMEOUT_LIMIT = 100000; /* ~100ms timeout at typical CPU speeds */
+  const uint32_t TIMEOUT_LIMIT = 100000;
 
   int16_t r;
   do {
